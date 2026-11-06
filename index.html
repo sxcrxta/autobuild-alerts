@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>autobuild 알림</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" href="icon-192.png">
+<meta name="theme-color" content="#16121c">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="autobuild">
+<style>
+:root{--bg:#16121c;--panel:#221c2b;--line:#3a3046;--ink:#f3eefa;--sub:#b4a8c4;--dim:#857a96;--accent:#ffd34d;--ok:#7be0a4;--bad:#ff8b8b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo",sans-serif;
+  padding:calc(env(safe-area-inset-top) + 16px) 16px calc(env(safe-area-inset-bottom) + 24px)}
+h1{font-size:22px;margin:4px 0 2px}.sub{color:var(--sub);font-size:14px;margin:0 0 18px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;margin:0 0 14px}
+.card h2{font-size:15px;margin:0 0 8px;color:var(--accent)}
+.step{color:var(--sub);font-size:14px;margin:4px 0}
+button{width:100%;min-height:48px;border:0;border-radius:12px;background:var(--accent);color:#1d1626;font:700 16px inherit;cursor:pointer}
+button:disabled{opacity:.5}
+.code{font:700 34px/1.1 ui-monospace,Menlo,monospace;letter-spacing:4px;text-align:center;margin:10px 0;color:var(--ink)}
+.cmd{background:#120e17;border-radius:8px;padding:10px;font:14px ui-monospace,Menlo,monospace;word-break:break-all;color:var(--ok)}
+.st{font-size:14px;margin-top:10px;color:var(--sub)}.st.bad{color:var(--bad)}.st.ok{color:var(--ok)}
+.msg{border-top:1px solid var(--line);padding:10px 0}.msg:first-child{border-top:0}
+.msg b{display:block}.msg small{color:var(--dim)}.msg p{margin:2px 0;color:var(--sub);font-size:14px;white-space:pre-wrap}
+.empty{color:var(--dim);font-size:14px}
+</style>
+</head>
+<body>
+<h1>autobuild 알림</h1>
+<p class="sub">빌더가 물어보거나, 끝나거나, 막히면 이 폰으로 알려줘요.</p>
+
+<section class="card" id="install" hidden>
+  <h2>1. 홈 화면에 추가</h2>
+  <p class="step">아이폰은 홈 화면에 추가한 앱에서만 알림을 받을 수 있어요.</p>
+  <p class="step">Safari 아래쪽 공유 버튼 → <b>홈 화면에 추가</b> → 홈 화면의 autobuild 아이콘으로 다시 열기</p>
+</section>
+
+<section class="card" id="setup">
+  <h2 id="setupTitle">알림 켜기</h2>
+  <button id="enable">알림 켜기</button>
+  <div id="pair" hidden>
+    <p class="step">맥 터미널에서 이 명령을 실행하면 연결돼요 (10분 안에):</p>
+    <div class="code" id="code"></div>
+    <div class="cmd" id="cmd"></div>
+  </div>
+  <div class="st" id="st"></div>
+</section>
+
+<section class="card">
+  <h2>받은 알림</h2>
+  <div id="inbox"><p class="empty">아직 없어요.</p></div>
+</section>
+
+<script>
+const VAPID = 'BC29PmUUmM0uyPM_aU4ahTGB-9Nktp_Pfy4BnGqC7dZsry23gBH_B5U7fIPs-VTa-S2QRWqo_Dg04cMPLfWig8s';
+const RELAY = 'https://ntfy.sh/';
+const $ = id => document.getElementById(id);
+const say = (t, cls = '') => { $('st').textContent = t; $('st').className = 'st ' + cls; };
+const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+const ios = /iPhone|iPad|iPod/.test(navigator.userAgent);
+if (ios && !standalone) $('install').hidden = false;
+
+function b64(s) { const p = '='.repeat((4 - s.length % 4) % 4); const r = atob((s + p).replace(/-/g, '+').replace(/_/g, '/')); return Uint8Array.from(r, c => c.charCodeAt(0)); }
+function newCode() { const a = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; const v = crypto.getRandomValues(new Uint8Array(8)); return [...v].map(x => a[x % a.length]).join(''); }
+
+async function reg() { return navigator.serviceWorker.register('sw.js'); }
+
+async function enable() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window))
+    return say(ios ? '홈 화면에 추가한 앱으로 열어야 알림을 켤 수 있어요.' : '이 브라우저는 웹 알림을 지원하지 않아요.', 'bad');
+  $('enable').disabled = true;
+  try {
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') { $('enable').disabled = false; return say('알림이 허용되지 않았어요. 설정 → 알림에서 autobuild를 허용해 주세요.', 'bad'); }
+    const r = await reg(); await navigator.serviceWorker.ready;
+    let sub = await r.pushManager.getSubscription();
+    if (!sub) sub = await r.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64(VAPID) });
+    const code = newCode();
+    const body = JSON.stringify({ sub: sub.toJSON(), ua: navigator.userAgent.slice(0, 120), t: Date.now() });
+    const res = await fetch(RELAY + 'ab-pair-' + code, { method: 'POST', body });
+    if (!res.ok) throw new Error('연결 코드 보내기 실패 ' + res.status);
+    localStorage.setItem('ab-code', code);
+    $('code').textContent = code.slice(0, 4) + ' ' + code.slice(4);
+    $('cmd').textContent = 'autobuild phone pair ' + code;
+    $('pair').hidden = false; $('enable').hidden = true;
+    say('맥에서 연결하면 테스트 알림이 와요.');
+  } catch (e) { $('enable').disabled = false; say('실패: ' + e.message, 'bad'); }
+}
+$('enable').onclick = enable;
+
+async function showInbox() {
+  try {
+    const c = await caches.open('ab-inbox'); const r = await c.match('inbox');
+    const list = r ? await r.json() : [];
+    if (!list.length) return;
+    $('inbox').innerHTML = list.slice().reverse().map(m => `<div class="msg"><b></b><p></p><small></small></div>`).join('');
+    [...$('inbox').children].forEach((el, i) => { const m = list[list.length - 1 - i];
+      el.querySelector('b').textContent = m.title; el.querySelector('p').textContent = m.body || ''; el.querySelector('small').textContent = new Date(m.t).toLocaleString('ko-KR'); });
+  } catch {}
+}
+(async () => {
+  if (!('serviceWorker' in navigator)) return;
+  const r = await reg().catch(() => null);
+  const sub = r && 'pushManager' in r ? await r.pushManager.getSubscription().catch(() => null) : null;
+  if (sub && Notification.permission === 'granted') { $('setupTitle').textContent = '알림 켜짐'; say('이 폰으로 알림이 와요. 다시 연결하려면 아래 버튼.', 'ok'); $('enable').textContent = '다시 연결 코드 만들기'; }
+  showInbox();
+  navigator.serviceWorker.addEventListener('message', showInbox);
+})();
+</script>
+</body>
+</html>
